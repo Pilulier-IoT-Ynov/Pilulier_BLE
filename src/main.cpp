@@ -1,28 +1,144 @@
 #include <esp_now.h>
 #include <WiFi.h>
+#include <ArduinoJson.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <time.h>
 
-uint8_t broadcastAddress[] = {0xF0, 0x9E, 0x9E, 0x3B, 0x35, 0x38};
+#define SERVICE_UUID "12345678-1234-1234-1234-123456789012"
+#define CHARACTERISTIC_UUID "87654321-4321-4321-4321-210987654321"
+#define BUTTON_PIN 1
 
-// Structure exemple pour envoyer des données
-// Doit correspondre à la structure du récepteur
+bool receivedBluetooth;
+bool isalreadysend;
+bool buttonPressed = false;
+
+std::string valuefromBluetooth;
+
 typedef struct struct_message
 {
-  char a[32];
-  int b;
-  float c;
-  bool d;
+  char c[32];
+  char j[128];
 } struct_message;
+
+typedef struct struct_message2
+{
+  char r[32];
+} struct_message2;
 
 // Créer une struct_message appelée myData
 struct_message myData;
+struct_message2 incomingMessage;
+
+uint8_t broadcastAddress[] = {0xF0, 0x9E, 0x9E, 0x3B, 0x38, 0x7C};
+
+// Structure exemple pour envoyer des données
+// Doit correspondre à la structure du récepteur
 
 esp_now_peer_info_t peerInfo;
+
+class MyCallbacks : public BLECharacteristicCallbacks, public BLEServerCallbacks
+{
+  void onWrite(BLECharacteristic *pCharacteristic)
+  {
+    std::string valuefromBluetooth = pCharacteristic->getValue();
+    if (valuefromBluetooth.length() > 0)
+    {
+      Serial.println("Received Value: ");
+      for (int i = 0; i < valuefromBluetooth.length(); i++)
+        Serial.print(valuefromBluetooth[i]);
+      Serial.println();
+      JsonDocument doc;
+      deserializeJson(doc, valuefromBluetooth);
+      String currentday = doc["currentDay"];
+      Serial.println(currentday);
+
+      strncpy(myData.c, "json", 32);
+      strncpy(myData.j, valuefromBluetooth.c_str(), 128);
+      isalreadysend = false;
+      receivedBluetooth = true;
+    }
+  }
+
+  void onConnect(BLEServer *pServer)
+  {
+    Serial.println("Client connected");
+  }
+
+  void onDisconnect(BLEServer *pServer)
+  {
+    Serial.println("Client disconnected");
+    // Restart advertising after client disconnects
+    BLEDevice::getAdvertising()->start();
+    Serial.println("Advertising restarted");
+  }
+};
+
+void setTimeFromPillulier(int yr, int month, int mday, int wday, int hr, int minute, int sec, int isDst)
+{
+  struct tm tm;
+  Serial.printf("Paramètrage de l'ESP-32 à l'heure du pillulier'...");
+
+  tm.tm_year = yr - 1900;
+  tm.tm_mon = month - 1;
+  tm.tm_mday = mday;
+  tm.tm_wday = wday;
+  tm.tm_hour = hr;
+  tm.tm_min = minute;
+  tm.tm_sec = sec;
+  tm.tm_isdst = isDst;
+  time_t t = mktime(&tm);
+  Serial.printf("Paramètrage de l'heure: %s", asctime(&tm));
+  struct timeval now = {.tv_sec = t};
+  settimeofday(&now, NULL);
+}
+
+void setupBLE()
+{
+  BLEDevice::init("ESP32_Pilulier");
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyCallbacks());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  BLECharacteristic *pCharacteristic = pService->createCharacteristic(
+      CHARACTERISTIC_UUID,
+      BLECharacteristic::PROPERTY_READ |
+          BLECharacteristic::PROPERTY_WRITE);
+
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pService->start();
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
+  pAdvertising->setMinPreferred(0x12);
+  pAdvertising->start();
+  Serial.println("BLE Advertising started");
+}
 
 // callback lorsque les données sont envoyées
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status)
 {
-  Serial.print("\r\nStatut du dernier paquet envoyé:\t");
-  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Succès de la livraison" : "Échec de la livraison");
+  Serial.println("Data Send");
+  // Serial.print("\r\nStatut du dernier paquet envoyé:\t");
+  // Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Succès de la livraison" : "Échec de la livraison");
+}
+
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
+{
+  Serial.println("Data received");
+  memcpy(&incomingMessage, incomingData, sizeof(incomingMessage));
+  Serial.print("Message: ");
+  Serial.println(incomingMessage.r);
+
+  if (strcmp(incomingMessage.r, "OK") == 0)
+  {
+    isalreadysend = true;
+  }
+  // else if (strcmp(incomingMessage.r, "VIDE") == 0)
+  // {
+  //   isalreadysend = false;
+  // }
 }
 
 void setup()
@@ -43,6 +159,7 @@ void setup()
   // Une fois ESPNow initialisé avec succès, nous enregistrerons pour Send CB
   // pour obtenir le statut du paquet transmis
   esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
 
   // Enregistrer le pair
   memcpy(peerInfo.peer_addr, broadcastAddress, 6);
@@ -55,159 +172,39 @@ void setup()
     Serial.println("Échec de l'ajout du pair");
     return;
   }
+
+  // Setup BLE
+  setupBLE();
+
+  // Setup button pin
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 }
 
 void loop()
 {
-  Serial.println(WiFi.macAddress());
-
-  // Définir les valeurs à envoyer
-  strcpy(myData.a, "C'EST UN CHAR");
-  myData.b = random(1, 20);
-  myData.c = 1.2;
-  myData.d = false;
-
-  // Envoyer le message via ESP-NOW
-  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&myData, sizeof(myData));
-
-  if (result == ESP_OK)
+  if (isalreadysend == false && receivedBluetooth == true)
   {
-    Serial.println("Envoyé avec succès");
+    Serial.println(myData.c);
+    Serial.println(myData.j);
+    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)&myData, sizeof(myData));
+  }
+
+  // Check if button is pressed
+  if (digitalRead(BUTTON_PIN) == LOW)
+  {
+    if (!buttonPressed)
+    {
+      buttonPressed = true;
+      struct_message stopMessage;
+      strncpy(stopMessage.c, "STOP", 32);
+      esp_now_send(broadcastAddress, (uint8_t *)&stopMessage, sizeof(stopMessage));
+      Serial.println("STOP message sent");
+    }
   }
   else
   {
-    Serial.println("Erreur lors de l'envoi des données");
+    buttonPressed = false;
   }
-  delay(2000);
+
+  delay(1000);
 }
-
-// #include <Arduino.h>
-// #include "esp_bt_main.h"
-// #include "esp_bt_device.h"
-// #include <BLEDevice.h>
-// #include <BLEServer.h>
-// #include <BLEUtils.h>
-// #include <BLE2902.h>è
-// #include <BLE2904.h>
-// #include <BLEClient.h>
-// #include <BLEScan.h>
-
-// #define LED_PIN 2
-// #define BUTTON_PIN 1
-// #define SERVICE_UUID "12345678-1234-1234-1234-123456789abc"
-// #define CHARACTERISTIC_UUID "12345678-1234-1234-1234-123456789abc"
-
-// BLECharacteristic *pCharacteristic;
-// BLEClient *pClient;
-// BLERemoteCharacteristic *pRemoteCharacteristic;
-
-// class MyServerCallbacks : public BLEServerCallbacks
-// {
-// public:
-//   void onConnect(BLEServer *pServer)
-//   {
-//     Serial.println("Client connected");
-//     Serial.flush(); // Ensure the message is completely sent
-//   }
-
-//   void onDisconnect(BLEServer *pServer)
-//   {
-//     Serial.println("Client disconnected, restarting ESP32...");
-//     Serial.flush(); // Ensure the message is completely sent
-//     delay(1000);    // Wait a moment before restarting
-//     ESP.restart();
-//   }
-// };
-
-// class MyCallbacks : public BLECharacteristicCallbacks
-// {
-//   void onWrite(BLECharacteristic *pCharacteristic)
-//   {
-//     std::string value = pCharacteristic->getValue();
-//     if (value == "ON")
-//     {
-//       digitalWrite(LED_PIN, HIGH);
-//     }
-//     else if (value == "OFF")
-//     {
-//       digitalWrite(LED_PIN, LOW);
-//     }
-//   }
-// };
-
-// void connectToServer()
-// {
-//   BLEScan *pBLEScan = BLEDevice::getScan();
-//   pBLEScan->setActiveScan(true);
-//   BLEScanResults scanResults = pBLEScan->start(10); // Increase scan time to 10 seconds
-//   for (int i = 0; i < scanResults.getCount(); i++)
-//   {
-//     BLEAdvertisedDevice advertisedDevice = scanResults.getDevice(i);
-//     Serial.print("Found device: ");
-//     Serial.println(advertisedDevice.toString().c_str());
-//     if (advertisedDevice.getName() == "ESP32_JEREM")
-//     {
-//       Serial.println("Found our device! Connecting...");
-//       pClient = BLEDevice::createClient();
-//       pClient->connect(&advertisedDevice);
-//       pRemoteCharacteristic = pClient->getService(BLEUUID(SERVICE_UUID))->getCharacteristic(BLEUUID(CHARACTERISTIC_UUID));
-//       if (pRemoteCharacteristic != nullptr)
-//       {
-//         Serial.println("Connected to server and found characteristic.");
-//       }
-//       else
-//       {
-//         Serial.println("Failed to find characteristic.");
-//       }
-//       break;
-//     }
-//   }
-// }
-
-// void setup()
-// {
-//   Serial.begin(115200);
-//   pinMode(LED_PIN, OUTPUT);
-//   pinMode(BUTTON_PIN, INPUT_PULLUP);
-//   BLEDevice::init("ESP32_JEFFREY");
-//   BLEServer *pServer = BLEDevice::createServer();
-//   pServer->setCallbacks(new MyServerCallbacks());
-//   BLEService *pService = pServer->createService(SERVICE_UUID);
-//   pCharacteristic = pService->createCharacteristic(
-//       CHARACTERISTIC_UUID,
-//       BLECharacteristic::PROPERTY_READ |
-//           BLECharacteristic::PROPERTY_WRITE |
-//           BLECharacteristic::PROPERTY_NOTIFY);
-//   BLE2904 *p2904Descriptor = new BLE2904();
-//   p2904Descriptor->setFormat(BLE2904::FORMAT_UTF8);
-//   pCharacteristic->addDescriptor(p2904Descriptor);
-//   pCharacteristic->setCallbacks(new MyCallbacks());
-//   pService->start();
-//   BLEAdvertising *pAdvertising = pServer->getAdvertising();
-//   pAdvertising->start();
-//   Serial.println("Waiting for a client connection to notify...");
-
-//   connectToServer();
-// }
-
-// void loop()
-// {
-//   if (digitalRead(BUTTON_PIN) == LOW)
-//   {
-//     digitalWrite(LED_PIN, HIGH);
-//     if (pRemoteCharacteristic != nullptr)
-//     {
-//       pRemoteCharacteristic->writeValue("ON");
-//     }
-//     delay(1000); // Debounce delay
-//   }
-//   else
-//   {
-//     digitalWrite(LED_PIN, LOW);
-//     if (pRemoteCharacteristic != nullptr)
-//     {
-//       pRemoteCharacteristic->writeValue("OFF");
-//     }
-//     delay(100); // Debounce delay
-//   }
-// }
